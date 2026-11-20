@@ -1,0 +1,13 @@
+.build/
+dist/
+.DS_Store
+.swiftpm/xcode/package.xcworkspace/xcuserdata/
+.env
+*.p12
+*.pfx
+*.pem
+*.key
+*.sqlite3*
+moves.jsonl
+move-worker.lock
+token
