@@ -1,10 +1,12 @@
 # MailMCP
 
-A Swift MCP server for Mail.app. It sends native Apple Events from a signed app bundle using Mail's scripting dictionary. It runs in the logged-in user's macOS session and listens on loopback.
+A Swift MCP server for Mail.app, deliberately restricted to organizing messages because that is the only thing that it is sensible for an agent to do.
 
-This is a source preview. Build with Swift 5.10 or later from Xcode or the Command Line Tools. The deployment target is macOS 13. Live Mail automation has been tested on newer macOS versions on Apple silicon.
+It sends native Apple Events from a signed app bundle using Mail's scripting dictionary and runs in the logged-in user's macOS session. Since I only use heavily sandboxed agents, it listens on loopback.
 
-MailMCP is designed for local use. Keep the bearer token private. A client with the token can read message metadata and move messages using your Mail accounts.
+This is a source preview. Build with Swift 5.10 or later from Xcode or the Command Line Tools. The deployment target is macOS 13, because I might want to run this in a VM at some point. Live Mail automation has been tested on macOS 27.2.1 (26B131) on Apple silicon.
+
+MailMCP is designed for local use, but you still should keep the bearer token private. A client with the token can read message metadata and move messages using your Mail accounts, but can't send e-mail, can't access any credentials whatsoever and has limited access to content (by design).
 
 ## Run the signed server
 
