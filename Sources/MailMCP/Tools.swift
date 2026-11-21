@@ -77,18 +77,11 @@ final class Tools {
     }
 
     func takeOverMoves(_ ids: [UUID]) throws {
-        try moves.takeOver(ids) { record, progress in
-            let args = Arguments(values: record)
-            return try self.executeMove(source: args.mailboxAddress("source"), destination: args.mailboxAddress("destination"),
-                                        id: args.integer("id", in: 1...Int(Int32.max)),
-                                        messageID: args.string("messageId", required: true)!,
-                                        verifyArrival: args.boolean("verifyArrival"),
-                                        trace: CallTrace("move_worker", id: args.operationID(required: true)!), progress: progress)
-        }
+        try moves.takeOver(ids, execute: moveExecutor())
     }
 
     static func usesMailQueue(_ name: String) -> Bool {
-        name != "move_message" && name != "get_move_status"
+        name != "move_message" && name != "move_messages" && name != "get_move_status"
     }
     private static let string: JSON = ["type": "string", "minLength": 1]
     private static let uuid: JSON = ["type": "string", "format": "uuid"]
@@ -114,6 +107,15 @@ final class Tools {
             "mailboxId": described(uuid, "Pass the ID from the same listed folder to verify its identity.")
         ]
     ]
+    private static let moveFields: JSON = [
+        "source": described(mailbox, "The message's current mailbox from listing or search."),
+        "destination": described(mailbox, "The intended folder from list_mailboxes. This may be in another account."),
+        "id": described(id, "The local numeric id from the source message."),
+        "messageId": described(string, "The exact RFC Message-ID returned as messageId for the same source message."),
+        "operationId": described(uuid, "A client-generated UUID for this move. Reuse it with identical arguments if acknowledgement is lost."),
+        "verifyArrival": ["type": "boolean", "default": false, "description": "Record a destination baseline before dispatch. Requires a destination with fewer than \(Mail.reconciliationLimit) messages."]
+    ]
+    private static let requiredMoveFields = ["source", "destination", "id", "messageId"]
     private static let scope: JSON = [
         "accountId": account,
         "mailbox": described(mailbox, "Scope to an exact physical mailbox. Supply mailbox or accountId, or omit both to use all accounts."),
@@ -175,18 +177,18 @@ final class Tools {
         tool("move_message", title: "Queue a Mail move",
              """
              Queue a move between two exact physical mailboxes. Use the id and messageId from the same source listing or search result. The response acknowledges a recorded operation. Poll get_move_status to learn whether Mail confirmed the move. If the response is lost, resubmit with the same operationId and identical arguments to retrieve the original operation.
-             """, [
-                "source": described(mailbox, "The message's current mailbox from listing or search."),
-                "destination": described(mailbox, "The intended folder from list_mailboxes. This may be in another account."),
-                "id": described(id, "The local numeric id from the source message."),
-                "messageId": described(string, "The exact RFC Message-ID returned as messageId for the same source message."),
-                "operationId": described(uuid, "Generate this UUID before submitting if you need to recover from a lost acknowledgement."),
-                "verifyArrival": ["type": "boolean", "default": false, "description": "Record a destination baseline before dispatch so a new destination ID can verify the move when Mail returns no receipt. Requires a destination with fewer than \(Mail.reconciliationLimit) messages."]
-             ], required: ["source", "destination", "id", "messageId"], writes: true),
+             """, moveFields, required: requiredMoveFields, writes: true),
+        tool("move_messages", title: "Queue multiple Mail moves",
+             """
+             Queue up to \(MoveOperations.batchLimit) moves in one call. Give each message a unique operationId and its own source, destination, id and messageId. New entries are recorded together before dispatch. The result contains operations in input order. Mail executes each move separately and outcomes can differ. Check each operation with get_move_status. To recover a lost response, resubmit with the same UUIDs and arguments.
+             """, ["moves": ["type": "array", "minItems": 1, "maxItems": MoveOperations.batchLimit,
+                             "items": ["type": "object", "properties": moveFields, "additionalProperties": false,
+                                       "required": requiredMoveFields + ["operationId"]]]],
+             required: ["moves"], writes: true),
         tool("get_move_status", title: "Check a Mail move",
              """
              Read the journal by operation ID. Queued, preflight and applying are in progress. Phase awaiting_verification with outcome accepted means Mail acknowledged the move. A usable receipt or destination baseline triggers one background check. Set recheck on an accepted or unknown move to request bounded reconciliation after sync. Observed matching destination IDs can include pre-existing copies. Only verified includes a confirmed destinationId. Expired means the audit details were purged and the UUID remains reserved.
-             """, ["operationId": described(uuid, "The UUID supplied to or returned by move_message."),
+             """, ["operationId": described(uuid, "The UUID supplied to or returned by move_message or move_messages."),
                    "recheck": ["type": "boolean", "default": false, "description": "Request read-only background reconciliation of an accepted or unknown move."]], required: ["operationId"])
     ]
 
@@ -199,7 +201,19 @@ final class Tools {
         let args = Arguments(values: values)
         switch name {
         case "move_message":
-            return try submitMove(args, checkCancellation: checkCancellation)
+            let request = try moveRequest(args, requireOperationID: false)
+            try checkCancellation()
+            return try moves.submit([request], execute: moveExecutor())[0]
+        case "move_messages":
+            guard let items = values["moves"] as? [JSON], (1...MoveOperations.batchLimit).contains(items.count) else {
+                throw Failure("moves must be an array of 1 to \(MoveOperations.batchLimit) move objects.")
+            }
+            let requests = try items.enumerated().map { index, item in
+                do { return try moveRequest(Arguments(values: item), requireOperationID: true) }
+                catch { throw Failure("moves[\(index)] \(error.localizedDescription)") }
+            }
+            try checkCancellation()
+            return ["operations": try moves.submit(requests, execute: moveExecutor())]
         case "get_move_status":
             return try moves.status(args.operationID(required: true)!, recheck: args.boolean("recheck"))
         default:
@@ -382,37 +396,51 @@ final class Tools {
         return score
     }
 
-    private func submitMove(_ args: Arguments, checkCancellation: () throws -> Void) throws -> JSON {
+    private func moveRequest(_ args: Arguments, requireOperationID: Bool) throws -> MoveRequest {
+        guard Set(args.values.keys).isSubset(of: Self.moveFields.keys) else { throw Failure("Unknown move argument.") }
         let source = try args.mailboxAddress("source")
         let destination = try args.mailboxAddress("destination")
         guard source != destination else { throw Failure("Source and destination must differ.") }
         let id = try args.integer("id", in: 1...Int(Int32.max))
         let key = try args.string("messageId", required: true)!
-        let verifyArrival = try args.boolean("verifyArrival")
-        let operationID = try args.operationID(required: false) ?? UUID()
-        try checkCancellation()
-        return try moves.submit(operationID, source: source, destination: destination, id: id, messageID: key,
-                                verifyArrival: verifyArrival) { progress in
-            try self.executeMove(source: source, destination: destination, id: id, messageID: key,
-                                 verifyArrival: verifyArrival, trace: CallTrace("move_worker", id: operationID),
-                                 progress: progress)
+        return try MoveRequest(operationID: args.operationID(required: requireOperationID) ?? UUID(),
+                               source: source, destination: destination, id: id, messageID: key,
+                               verifyArrival: args.boolean("verifyArrival"))
+    }
+
+    // The serial move worker owns this per-submission cache.
+    private func moveExecutor() -> (JSON, MoveProgress) throws -> JSON {
+        var mailboxes: [MailboxAddress: (box: Mailbox, expires: TimeInterval)] = [:]
+        return { record, progress in
+            let request = try self.moveRequest(Arguments(values: record.filter { Self.moveFields.keys.contains($0.key) }),
+                                               requireOperationID: true)
+            let trace = CallTrace("move_worker", id: request.operationID)
+            let mail = Mail(scheduler: self.scheduler, trace: trace, timeBudget: 20, waitForRecovery: true)
+            func resolve(_ address: MailboxAddress) throws -> Mailbox {
+                let now = ProcessInfo.processInfo.systemUptime
+                if let cached = mailboxes[address], cached.expires > now { return cached.box }
+                let box = try mail.resolve(address)
+                mailboxes[address] = (box, now + 5)
+                return box
+            }
+            let source = try resolve(request.source)
+            let destination = try resolve(request.destination)
+            return try self.executeMove(request, source: source, destination: destination,
+                                        mail: mail, trace: trace, progress: progress)
         }
     }
 
-    private func executeMove(source: MailboxAddress, destination: MailboxAddress, id: Int, messageID: String,
-                             verifyArrival: Bool, trace: CallTrace, progress: MoveProgress) throws -> JSON {
-        let mail = Mail(scheduler: scheduler, trace: trace, timeBudget: 20, waitForRecovery: true)
-        let source = try mail.resolve(source)
-        let destination = try mail.resolve(destination)
+    private func executeMove(_ request: MoveRequest, source: Mailbox, destination: Mailbox,
+                             mail: Mail, trace: CallTrace, progress: MoveProgress) throws -> JSON {
         guard source.id != destination.id else { throw Failure("Source and destination resolve to the same mailbox.") }
         var evidence: JSON = ["resolvedSource": source.json, "resolvedDestination": destination.json]
-        if verifyArrival {
+        if request.verifyArrival {
             evidence["destinationBaselineIds"] = try mail.matchingDestinationIDs(
-                messageID, in: destination, limit: Mail.reconciliationLimit - 1)
+                request.messageID, in: destination, limit: Mail.reconciliationLimit - 1)
         }
-        try mail.prepareMove(id: id, messageID: messageID, from: source)
+        try mail.prepareMove(id: request.id, messageID: request.messageID, from: source)
         defer { reads.invalidateDates([source.id, destination.id]) }
-        let receipt = try mail.move(id: id, to: destination, from: source) {
+        let receipt = try mail.move(id: request.id, to: destination, from: source) {
             try progress(.applying, evidence)
         }
         var accepted: JSON = ["status": "pending", "outcome": "accepted", "safeToRetry": false]

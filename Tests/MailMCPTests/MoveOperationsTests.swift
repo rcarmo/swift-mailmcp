@@ -220,4 +220,64 @@ final class MoveOperationsTests: XCTestCase {
         XCTAssertEqual(MoveVerification.compare(matchingIDs: [5], baseline: []).destinationID, 5)
     }
 
+    func testBatchAcknowledgesInOrderAndKeepsOutcomesIndependent() throws {
+        let operations = MoveOperations(automation: automation, directory: directory)
+        let batch = [request(1), request(2), request(3)]
+        let results = try operations.submit(batch) { record, progress in
+            if record["id"] as? Int == 2 { throw Failure("Source message missing") }
+            try progress(.applying, [:])
+            if record["id"] as? Int == 3 { throw Failure("Mail reply timed out") }
+            return ["status": "pending", "outcome": "accepted"]
+        }
+        XCTAssertEqual(results.compactMap { $0["operationId"] as? String }, batch.map { $0.operationID.uuidString })
+        XCTAssertTrue(results.allSatisfy { $0["phase"] as? String == "queued" })
+        automation.sync {}
+        let replay = try operations.submit(batch) { _, _ in
+            XCTFail("Batch replay dispatched another move")
+            return [:]
+        }
+        XCTAssertEqual(replay.compactMap { $0["outcome"] as? String }, ["accepted", "not_moved", "unknown"])
+        XCTAssertEqual(replay[1]["safeToRetry"] as? Bool, true)
+        XCTAssertEqual(replay[2]["safeToRetry"] as? Bool, false)
+    }
+
+    func testBatchRollsBackIfAnyInsertFails() throws {
+        let operations = MoveOperations(automation: automation, directory: directory)
+        let first = request(1)
+        let second = request(2)
+        XCTAssertThrowsError(try operations.status(first.operationID))
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(directory.appendingPathComponent("moves.sqlite3").path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        let sql = """
+            CREATE TRIGGER reject_second BEFORE INSERT ON move_events
+            WHEN new.operation_id = '\(second.operationID.uuidString)'
+            BEGIN SELECT RAISE(ABORT, 'test insert failure'); END;
+            """
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+        XCTAssertThrowsError(try operations.submit([first, second]) { _, _ in
+            XCTFail("A partially written batch started dispatching")
+            return [:]
+        })
+        XCTAssertThrowsError(try operations.status(first.operationID))
+        XCTAssertThrowsError(try operations.status(second.operationID))
+    }
+
+    func testBatchRejectsAConflictingReplayWithoutQueueingNewEntries() throws {
+        let operations = MoveOperations(automation: automation, directory: directory)
+        let existing = request(1)
+        _ = try operations.submit([existing]) { _, _ in ["status": "failed", "outcome": "not_moved"] }
+        automation.sync {}
+        let fresh = request(2)
+        XCTAssertThrowsError(try operations.submit([fresh, request(3, operationID: existing.operationID)]) { _, _ in
+            XCTFail("Conflicting batch started dispatching")
+            return [:]
+        })
+        XCTAssertThrowsError(try operations.status(fresh.operationID))
+    }
+
+    private func request(_ id: Int, operationID: UUID = UUID()) -> MoveRequest {
+        MoveRequest(operationID: operationID, source: source, destination: destination,
+                    id: id, messageID: "message-\(id)", verifyArrival: false)
+    }
 }

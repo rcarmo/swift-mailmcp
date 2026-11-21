@@ -69,7 +69,7 @@ private func all(_ type: String, _ parent: Descriptor) -> Descriptor {
     return spec(type, "indx", key, parent)
 }
 
-struct MailboxAddress: Equatable {
+struct MailboxAddress: Hashable {
     let account: String?
     let path: [String]
     var mailboxID: UUID? = nil

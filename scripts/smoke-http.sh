@@ -10,6 +10,19 @@ mkdir -p "$work/state"
 cat > "$work/state/moves.jsonl" <<'AUDIT_FIXTURE'
 {"operationId":"12345678-1234-1234-1234-123456789012","at":"2020-01-01T00:00:00Z","status":"verified"}
 AUDIT_FIXTURE
+python3 - >> "$work/state/moves.jsonl" <<'BATCH_FIXTURE'
+from datetime import datetime, timezone
+import json
+for message in (2, 3):
+    print(json.dumps({
+        "operationId": f"20000000-0000-4000-8000-{message:012d}",
+        "at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "status": "verified", "destinationId": message + 20,
+        "source": {"accountId": None, "path": ["Source"]},
+        "destination": {"accountId": "test-account", "path": ["Archive"]},
+        "id": message, "messageId": f"message-{message}",
+    }))
+BATCH_FIXTURE
 MAILMCP_PORT=$port MAILMCP_TOKEN=$token MAILMCP_STATE_DIR="$work/state" "$binary" >"$work/server.log" 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
@@ -34,9 +47,9 @@ status() {
 [[ $(status -H "$auth" -H 'Origin: https://example.org') == 403 ]]
 [[ $(status -H "$auth" -H "Host: example.org:$port") == 403 ]]
 post --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}' |
-    python3 -c 'import json,sys; result=json.load(sys.stdin)["result"]; assert result["protocolVersion"] == "2025-11-25" and result["serverInfo"]["version"] == "0.4.2"'
+    python3 -c 'import json,sys; result=json.load(sys.stdin)["result"]; assert result["protocolVersion"] == "2025-11-25" and result["serverInfo"]["version"] == "0.5.0"'
 post --data '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' |
-    python3 -c 'import json,sys; tools={t["name"]: t for t in json.load(sys.stdin)["result"]["tools"]}; assert set(tools) == {"list_mailboxes", "list_messages", "search_messages", "find_similar_messages", "move_message", "get_move_status"}; assert tools["move_message"]["title"] == "Queue a Mail move" and {tuple(x["required"]) for x in tools["search_messages"]["inputSchema"]["anyOf"]} == {("query",), ("to",), ("cc",)}'
+    python3 -c 'import json,sys; tools={t["name"]: t for t in json.load(sys.stdin)["result"]["tools"]}; assert set(tools) == {"list_mailboxes", "list_messages", "search_messages", "find_similar_messages", "move_message", "move_messages", "get_move_status"}; assert tools["move_messages"]["inputSchema"]["properties"]["moves"]["maxItems"] == 50 and {tuple(x["required"]) for x in tools["search_messages"]["inputSchema"]["anyOf"]} == {("query",), ("to",), ("cc",)}'
 post -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: server/discover' \
     --data '{"jsonrpc":"2.0","id":3,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}' |
     python3 -c 'import json,sys; assert set(json.load(sys.stdin)["result"]["capabilities"]) == {"tools", "prompts"}'
@@ -118,5 +131,26 @@ for _ in range(30):
     time.sleep(0.1)
 else:
     raise AssertionError("Startup journal maintenance did not expire a legacy operation")
+
+batch = [{
+    "operationId": f"20000000-0000-4000-8000-{message:012d}",
+    "source": {"accountId": None, "path": ["Source"]},
+    "destination": {"accountId": "test-account", "path": ["Archive"]},
+    "id": message, "messageId": f"message-{message}",
+} for message in (3, 2)]
+request = urllib.request.Request(f"http://127.0.0.1:{port}/mcp",
+                                data=call("move_messages", {"moves": batch}), headers=headers)
+with urllib.request.urlopen(request, timeout=5) as response:
+    assert response.headers.get_content_type() == "application/json"
+    operations = json.load(response)["result"]["structuredContent"]["operations"]
+    assert [r["destinationId"] for r in operations] == [23, 22]
+    assert [r["operationId"] for r in operations] == [r["operationId"] for r in batch]
+
+invalid_batch = [batch[0], {key: value for key, value in batch[1].items() if key != "operationId"}]
+request = urllib.request.Request(f"http://127.0.0.1:{port}/mcp",
+                                data=call("move_messages", {"moves": invalid_batch}), headers=headers)
+with urllib.request.urlopen(request, timeout=5) as response:
+    result = json.load(response)["result"]
+    assert result["isError"] and "moves[1]" in result["content"][0]["text"]
 PYTEST
 printf 'HTTP smoke checks passed.\n'

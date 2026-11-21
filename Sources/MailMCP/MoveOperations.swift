@@ -137,7 +137,31 @@ enum MovePhase: String {
 
 typealias MoveProgress = (MovePhase, JSON) throws -> Void
 
+struct MoveRequest {
+    let operationID: UUID
+    let source: MailboxAddress
+    let destination: MailboxAddress
+    let id: Int
+    let messageID: String
+    let verifyArrival: Bool
+
+    var arguments: JSON {
+        ["operationId": operationID.uuidString, "source": source.json, "destination": destination.json,
+         "id": id, "messageId": messageID, "verifyArrival": verifyArrival]
+    }
+
+    func matches(_ entry: JSON) throws -> Bool {
+        let args = Arguments(values: entry)
+        return try args.mailboxAddress("source") == source && args.mailboxAddress("destination") == destination &&
+            entry["id"] as? Int == id && entry["messageId"] as? String == messageID &&
+            args.boolean("verifyArrival") == verifyArrival
+    }
+}
+
 final class MoveOperations {
+    static let batchLimit = 50
+    private static let queueLimit = 64
+    private static let verificationLimit = 64
     static let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/MailMCP", isDirectory: true)
     private let automation: DispatchQueue
@@ -324,7 +348,7 @@ final class MoveOperations {
         try synchronized {
             guard let entry = try status(id, journal: database()) else { throw Failure("Move operation not found.") }
             if recheck && canRecheck(entry) {
-                guard checking.contains(id) || checking.count < 8 else {
+                guard checking.contains(id) || checking.count < Self.verificationLimit else {
                     throw Failure("The verification queue is busy. The move remains recorded. Check again later.")
                 }
                 scheduleCheck(id, entry: entry)
@@ -338,7 +362,7 @@ final class MoveOperations {
     // Called under lock. Checks read Mail on a separate queue and never dispatch a move.
     private func scheduleCheck(_ id: UUID, entry: JSON) {
         guard let verify, canRecheck(entry),
-              checking.count < 8, checking.insert(id).inserted else { return }
+              checking.count < Self.verificationLimit, checking.insert(id).inserted else { return }
         verification.async {
             let trace = CallTrace("move_verification", id: id)
             trace.log("started")
@@ -373,49 +397,74 @@ final class MoveOperations {
 
     func submit(_ operationID: UUID, source: MailboxAddress, destination: MailboxAddress, id: Int,
                 messageID: String, verifyArrival: Bool = false, execute: @escaping (MoveProgress) throws -> JSON) throws -> JSON {
-        try synchronized {
+        let request = MoveRequest(operationID: operationID, source: source, destination: destination,
+                                  id: id, messageID: messageID, verifyArrival: verifyArrival)
+        return try submit([request]) { _, progress in try execute(progress) }[0]
+    }
+
+    func submit(_ requests: [MoveRequest], execute: @escaping (JSON, MoveProgress) throws -> JSON) throws -> [JSON] {
+        guard (1...Self.batchLimit).contains(requests.count) else {
+            throw Failure("A batch must contain 1 to \(Self.batchLimit) moves.")
+        }
+        guard Set(requests.map(\.operationID)).count == requests.count else {
+            throw Failure("Each move in a batch must have its own operationId.")
+        }
+        let sources = Dictionary(grouping: requests) {
+            MailboxAddress(account: $0.source.account, path: $0.source.path)
+        }
+        guard sources.values.allSatisfy({ Set($0.map(\.id)).count == $0.count }) else {
+            throw Failure("The same source message appears more than once in the batch.")
+        }
+        let destinations = Dictionary(grouping: requests) {
+            MailboxAddress(account: $0.destination.account, path: $0.destination.path)
+        }
+        for items in destinations.values {
+            let matching = Dictionary(grouping: items, by: \.messageID)
+            guard !matching.values.contains(where: { $0.count > 1 && $0.contains(where: \.verifyArrival) }) else {
+                throw Failure("verifyArrival requires distinct Message-IDs for moves to the same destination in a batch.")
+            }
+        }
+
+        return try synchronized {
             let journal = try database()
-            func existing() throws -> JSON? {
-                guard let entry = try status(operationID, journal: journal) else { return nil }
-                if entry["status"] as? String == "expired" { return entry }
-                let args = Arguments(values: entry)
-                guard try args.mailboxAddress("source") == source, try args.mailboxAddress("destination") == destination,
-                      entry["id"] as? Int == id, entry["messageId"] as? String == messageID,
-                      (entry["verifyArrival"] as? Bool ?? false) == verifyArrival else {
-                    throw Failure("operationId is already assigned to a different move.")
+            func existing(_ request: MoveRequest) throws -> JSON? {
+                guard let entry = try status(request.operationID, journal: journal) else { return nil }
+                if entry["status"] as? String != "expired", try !request.matches(entry) {
+                    throw Failure("operationId \(request.operationID.uuidString) is already assigned to a different move.")
                 }
                 return entry
             }
-            if let entry = try existing() { return entry }
-            guard active.count < 8 else { throw Failure("The move queue is full. No move was queued.") }
+            let replayed = try requests.compactMap(existing)
+            if replayed.count == requests.count { return replayed }
             try acquireLease()
-            do {
-                // Check again under the worker lease in case another instance just finished.
-                if let entry = try existing() {
-                    if active.isEmpty { lease = nil }
-                    return entry
-                }
-                let pending = try journal.append([
-                    "operationId": operationID.uuidString, "id": id, "messageId": messageID,
-                    "source": source.json, "destination": destination.json, "status": "pending",
-                    "phase": "queued", "worker": worker, "verifyArrival": verifyArrival
-                ])
-                active.insert(operationID)
-                automation.async {
-                    self.run(operationID, pending: pending, execute: execute)
-                }
-                return publicRecord(pending)
-            } catch {
-                if active.isEmpty { lease = nil }
-                throw error
+            defer { if active.isEmpty { lease = nil } }
+            // Check again under the worker lease in case another instance just finished.
+            let previous = try requests.map(existing)
+            let count = previous.filter { $0 == nil }.count
+            guard active.count + count <= Self.queueLimit else {
+                throw Failure("The move queue has insufficient capacity. No new moves were queued.")
             }
+            let entries = try journal.transaction {
+                try zip(requests, previous).map { request, prior in
+                    if let prior { return prior }
+                    var pending = request.arguments
+                    pending["status"] = "pending"
+                    pending["phase"] = "queued"
+                    pending["worker"] = worker
+                    return try journal.append(pending)
+                }
+            }
+            for (index, request) in requests.enumerated() where previous[index] == nil {
+                schedule(request.operationID, entry: entries[index], execute: execute)
+            }
+            return entries.map(publicRecord)
         }
     }
 
     func takeOver(_ ids: [UUID], execute: @escaping (JSON, MoveProgress) throws -> JSON) throws {
         guard !ids.isEmpty else { return }
         try synchronized {
-            guard active.isEmpty, ids.count <= 8, Set(ids).count == ids.count else {
+            guard active.isEmpty, ids.count <= Self.queueLimit, Set(ids).count == ids.count else {
                 throw Failure("Invalid move handoff.")
             }
             let journal = try database()
@@ -433,11 +482,16 @@ final class MoveOperations {
                 }
             }
             for (id, entry) in zip(ids, entries) {
-                active.insert(id)
-                automation.async {
-                    self.run(id, pending: entry) { progress in try execute(entry, progress) }
-                }
+                schedule(id, entry: entry, execute: execute)
             }
+        }
+    }
+
+    // Called with the journal lock held, after the pending records have committed.
+    private func schedule(_ id: UUID, entry: JSON, execute: @escaping (JSON, MoveProgress) throws -> JSON) {
+        active.insert(id)
+        automation.async {
+            self.run(id, pending: entry) { progress in try execute(entry, progress) }
         }
     }
 

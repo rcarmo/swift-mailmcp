@@ -77,7 +77,7 @@ final class HTTPServer {
 
     private static let modern = "2026-07-28"
     private static let legacy = ["2025-11-25", "2025-06-18", "2025-03-26"]
-    private static let serverInfo = ["name": "MailMCP", "version": "0.4.2"]
+    private static let serverInfo = ["name": "MailMCP", "version": "0.5.0"]
     private static let capabilities: JSON = ["tools": [:] as JSON, "prompts": [:] as JSON]
 
     init(port: UInt16, token: String, stateDirectory: URL) throws {
@@ -388,6 +388,11 @@ final class HTTPServer {
                                             "isError": false], modern: modern)
                 if name == "move_message", let operationID = value["operationId"] as? String {
                     trace.log("operation_id=\(operationID)")
+                }
+                if name == "move_messages", let operations = value["operations"] as? [JSON] {
+                    for operationID in operations.compactMap({ $0["operationId"] as? String }) {
+                        trace.log("operation_id=\(operationID)")
+                    }
                 }
                 trace.log("completed")
             } catch {
