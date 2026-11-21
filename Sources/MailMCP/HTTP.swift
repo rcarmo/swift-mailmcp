@@ -152,7 +152,7 @@ final class HTTPServer {
                         self.respond(connection, "400 Bad Request")
                         return
                     }
-                    self.handle(connection, request, Data(buffer[delimiter.upperBound...]), cancellation)
+                    self.handle(connection, request, Data(buffer[delimiter.upperBound...]), cancellation, requestEnded: end)
                     return
                 }
             } else if buffer.count > 16_387 {
@@ -174,7 +174,7 @@ final class HTTPServer {
 
     private func respond(_ connection: NWConnection, _ status: String, extra: String = "", body: Data = Data(), trace: CallTrace? = nil) {
         let header = "HTTP/1.1 \(status)\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Length: \(body.count)\r\n\(extra)\r\n"
-        connection.send(content: Data(header.utf8) + body, completion: .contentProcessed { error in
+        connection.send(content: Data(header.utf8) + body, contentContext: .finalMessage, completion: .contentProcessed { error in
             trace?.log(error == nil ? "response_sent" : "response_send_failed")
             connection.cancel()
         })
@@ -201,7 +201,8 @@ final class HTTPServer {
         ["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": message]]
     }
 
-    private func handle(_ connection: NWConnection, _ request: Request, _ body: Data, _ cancellation: Cancellation) {
+    private func handle(_ connection: NWConnection, _ request: Request, _ body: Data, _ cancellation: Cancellation,
+                        requestEnded: Bool) {
         guard let host = request.headers["host"]?.lowercased(), hosts.contains(host),
               request.headers["origin"].map({ $0 == "http://\(host)" }) ?? true else {
             respond(connection, "403 Forbidden")
@@ -327,13 +328,15 @@ final class HTTPServer {
                 json(connection, rpcError(id, -32602, "Unknown tool"))
                 return
             }
-            stream(connection, id: id, name: name, arguments: params["arguments"] as? JSON ?? [:], modern: modern, cancellation: cancellation)
+            stream(connection, id: id, name: name, arguments: params["arguments"] as? JSON ?? [:],
+                   modern: modern, cancellation: cancellation, requestEnded: requestEnded)
         default:
             json(connection, rpcError(id, -32601, "Method not found"), status: modern ? "404 Not Found" : "200 OK")
         }
     }
 
-    private func stream(_ connection: NWConnection, id: Any, name: String, arguments: JSON, modern: Bool, cancellation: Cancellation) {
+    private func stream(_ connection: NWConnection, id: Any, name: String, arguments: JSON, modern: Bool,
+                        cancellation: Cancellation, requestEnded: Bool) {
         let trace = CallTrace(name)
         trace.log("received")
         let usesMail = Tools.usesMailQueue(name)
@@ -363,14 +366,17 @@ final class HTTPServer {
             timer.resume()
             heartbeat = timer
         }
-        // A peer can end its TCP write stream after POST and still be listening for the reply.
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, ended, error in
-            if error != nil || !(data?.isEmpty ?? true) {
-                trace.log("request_connection_failed")
-                cancellation.cancel()
-                connection.cancel()
-            } else if ended, (try? cancellation.check()) != nil {
-                trace.log("peer_write_stream_ended")
+        if !requestEnded {
+            // Only extra request bytes invalidate this POST. Finishing the TCP
+            // write stream can also end a pending receive with a read-side error.
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { data, _, ended, error in
+                if let data, !data.isEmpty {
+                    trace.log("unexpected_request_bytes")
+                    cancellation.cancel()
+                    connection.cancel()
+                } else if ended || error != nil {
+                    trace.log("peer_write_stream_ended")
+                }
             }
         }
 
@@ -410,7 +416,7 @@ final class HTTPServer {
                 }
                 if usesMail {
                     let event = Data("event: message\ndata: ".utf8) + data + Data("\n\n".utf8)
-                    connection.send(content: event, completion: .contentProcessed { error in
+                    connection.send(content: event, contentContext: .finalMessage, completion: .contentProcessed { error in
                         trace.log(error == nil ? "response_sent" : "response_send_failed")
                         connection.cancel()
                     })

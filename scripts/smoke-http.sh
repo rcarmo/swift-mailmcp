@@ -23,9 +23,10 @@ for message in (2, 3):
         "id": message, "messageId": f"message-{message}",
     }))
 BATCH_FIXTURE
-MAILMCP_PORT=$port MAILMCP_TOKEN=$token MAILMCP_STATE_DIR="$work/state" "$binary" >"$work/server.log" 2>&1 &
+MAILMCP_PORT=$port MAILMCP_TOKEN=$token MAILMCP_STATE_DIR="$work/state" MAILMCP_TRACE_STDERR=1 \
+    "$binary" >"$work/server.log" 2>&1 &
 pid=$!
-trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
+trap 'result=$?; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; if (( result != 0 )); then cat "$work/server.log"; fi; rm -rf "$work"' EXIT
 
 for _ in {1..50}; do
     if grep -q 'listening' "$work/server.log"; then break; fi
