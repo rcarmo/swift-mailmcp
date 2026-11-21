@@ -77,7 +77,7 @@ final class HTTPServer {
 
     private static let modern = "2026-07-28"
     private static let legacy = ["2025-11-25", "2025-06-18", "2025-03-26"]
-    private static let serverInfo = ["name": "MailMCP", "version": "0.4.1"]
+    private static let serverInfo = ["name": "MailMCP", "version": "0.4.2"]
     private static let capabilities: JSON = ["tools": [:] as JSON, "prompts": [:] as JSON]
 
     init(port: UInt16, token: String, stateDirectory: URL) throws {
@@ -235,7 +235,7 @@ final class HTTPServer {
             return
         }
         let id = rpc["id"] ?? NSNull()
-        if rpc["id"] != nil, !(id is String), !(id is NSNull) {
+        if rpc["id"] != nil, !(id is String) {
             guard let number = id as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
                   number.doubleValue.rounded(.towardZero) == number.doubleValue else {
                 json(connection, rpcError(NSNull(), -32600, "Invalid request ID"), status: "400 Bad Request")
@@ -248,9 +248,14 @@ final class HTTPServer {
             return
         }
         let protocolHeader = request.headers["mcp-protocol-version"]
-        let modern = protocolHeader == Self.modern
+        let meta = params["_meta"] as? JSON
+        let bodyVersion = meta?["io.modelcontextprotocol/protocolVersion"] as? String
+        let modern = protocolHeader == Self.modern || bodyVersion == Self.modern
         if modern {
-            let meta = params["_meta"] as? JSON
+            guard let bodyVersion, meta?["io.modelcontextprotocol/clientCapabilities"] is JSON else {
+                json(connection, rpcError(id, -32602, "Missing or invalid MCP request metadata"), status: "400 Bad Request")
+                return
+            }
             let name = params[method == "resources/read" ? "uri" : "name"] as? String
             let requiresName = ["tools/call", "prompts/get", "resources/read"].contains(method)
             let rawName = request.headers["mcp-name"]
@@ -261,7 +266,7 @@ final class HTTPServer {
             } else {
                 headerName = rawName
             }
-            if meta?["io.modelcontextprotocol/protocolVersion"] as? String != Self.modern ||
+            if protocolHeader != Self.modern || bodyVersion != Self.modern ||
                 request.headers["mcp-method"] != method ||
                 (requiresName && (name == nil || headerName != name)) {
                 json(connection, rpcError(id, -32020, "MCP metadata headers do not match the request"), status: "400 Bad Request")

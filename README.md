@@ -4,6 +4,8 @@ A Swift MCP server for Mail.app. It sends native Apple Events from a signed app 
 
 This is a source preview. Build with Swift 5.10 or later from Xcode or the Command Line Tools. The deployment target is macOS 13. Live Mail automation has been tested on newer macOS versions on Apple silicon.
 
+MailMCP is designed for local use. Keep the bearer token private. A client with the token can read message metadata and move messages using your Mail accounts.
+
 ## Run the signed server
 
 [Build and sign](#build-and-sign) the app first. Generate a bearer token once and use it in your MCP client.
@@ -23,6 +25,17 @@ open -a "$PWD/dist/MailMCP.app"
 ```
 
 Configure the client for **Streamable HTTP** at [http://127.0.0.1:8765/mcp](http://127.0.0.1:8765/mcp) with the header `Authorization: Bearer <token>`. At launch, `MAILMCP_TOKEN` can override the owner-only token file, and `MAILMCP_PORT` can override port 8765. The server uses request-scoped SSE for Mail reads and JSON for discovery, move acknowledgement, and move status. Clients can use MCP 2026-07-28 discovery or an initialize handshake with 2025-11-25, 2025-06-18, or 2025-03-26.
+
+Check the connection and token from Terminal. This request lists the tool definitions without reading mail.
+
+```sh
+printf 'Authorization: Bearer %s\n' "$(cat "$HOME/Library/Application Support/MailMCP/token")" |
+  curl --fail --silent --show-error --max-time 5 --header @- \
+    --header 'Accept: application/json, text/event-stream' \
+    --header 'Content-Type: application/json' \
+    --data '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+    http://127.0.0.1:8765/mcp
+```
 
 ## Tools and prompts
 
@@ -57,7 +70,7 @@ Poll `get_move_status` with the operation ID. The move worker resolves both fold
 
 To request reconciliation after Mail syncs, pass `"recheck": true` to `get_move_status` for an accepted move or an unknown dispatch. The server checks whether the source reference still exists. Without a receipt or a surviving source reference, it checks for the exact RFC Message-ID in a destination of up to 500 messages. Matching IDs are recorded as observations. The move stays accepted or unknown when the evidence could come from a pre-existing copy.
 
-For a move that needs destination evidence, submit with `"verifyArrival": true`. MailMCP records matching destination IDs before dispatch. A destination with 500 or more messages, or a failed baseline read, stops this mode before dispatch. Its background check can confirm exactly one new matching ID once the original reference is gone and the baseline matches remain. Verification uses Mail's local view. The account provider controls remote synchronization.
+For a move that needs destination evidence, submit with `"verifyArrival": true`. MailMCP records matching destination IDs before dispatch. A destination with 500 or more messages, or a failed baseline read, stops this mode before dispatch. Its background check looks for exactly one new matching ID once the original reference is gone and the baseline matches remain. Concurrent filing outside MailMCP can affect that comparison. Verification uses Mail's local view. The account provider controls remote synchronization.
 
 A failure before dispatch reports `not_moved`. A timeout or worker interruption after dispatch with no durable reply reports `unknown` and `safeToRetry: false`. Use the existing operation ID to recheck an unknown outcome.
 
@@ -95,6 +108,8 @@ swift test
 scripts/build-app.sh
 scripts/smoke-http.sh
 ```
+
+The HTTP smoke test needs Python 3. It uses an isolated state directory and runs without access to Mail. Run it with a different `MAILMCP_TEST_PORT` if port 18765 is in use.
 
 Keep the bundle identifier and signing identity stable on rebuilds. The local build pins the designated requirement to the certificate in the login keychain. Keep the private key available to sign updates. The bundle and signing scripts use Apple's [Apple Events entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.automation.apple-events) and [designated requirements](https://developer.apple.com/library/archive/technotes/tn2206/).
 

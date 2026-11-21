@@ -34,7 +34,7 @@ status() {
 [[ $(status -H "$auth" -H 'Origin: https://example.org') == 403 ]]
 [[ $(status -H "$auth" -H "Host: example.org:$port") == 403 ]]
 post --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}' |
-    python3 -c 'import json,sys; result=json.load(sys.stdin)["result"]; assert result["protocolVersion"] == "2025-11-25" and result["serverInfo"]["version"] == "0.4.1"'
+    python3 -c 'import json,sys; result=json.load(sys.stdin)["result"]; assert result["protocolVersion"] == "2025-11-25" and result["serverInfo"]["version"] == "0.4.2"'
 post --data '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' |
     python3 -c 'import json,sys; tools={t["name"]: t for t in json.load(sys.stdin)["result"]["tools"]}; assert set(tools) == {"list_mailboxes", "list_messages", "search_messages", "find_similar_messages", "move_message", "get_move_status"}; assert tools["move_message"]["title"] == "Queue a Mail move" and {tuple(x["required"]) for x in tools["search_messages"]["inputSchema"]["anyOf"]} == {("query",), ("to",), ("cc",)}'
 post -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: server/discover' \
@@ -50,6 +50,8 @@ python3 - "$port" "$token" <<'PYTEST'
 import json
 import socket
 import sys
+import time
+import urllib.error
 import urllib.request
 
 port, token = sys.argv[1:]
@@ -62,6 +64,28 @@ headers = {
 def call(name, arguments):
     return json.dumps({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                        "params": {"name": name, "arguments": arguments}}).encode()
+
+def assert_rpc_rejection(message, expected_code, extra_headers=None):
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/mcp", data=json.dumps(message).encode(),
+                                    headers={**headers, **(extra_headers or {})})
+    try:
+        urllib.request.urlopen(request, timeout=5).close()
+    except urllib.error.HTTPError as error:
+        assert error.code == 400
+        assert json.load(error)["error"]["code"] == expected_code
+    else:
+        raise AssertionError("Malformed MCP request was accepted")
+
+modern_headers = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "ping"}
+ping = {"jsonrpc": "2.0", "id": 7, "method": "ping", "params": {"_meta": {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {},
+}}}
+assert_rpc_rejection(ping, -32020, {"Mcp-Method": "ping"})
+assert_rpc_rejection({**ping, "id": None}, -32600, modern_headers)
+assert_rpc_rejection({**ping, "params": {"_meta": {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+}}}, -32602, modern_headers)
 
 with socket.create_connection(("127.0.0.1", int(port)), timeout=5) as conn:
     body = call("list_mailboxes", {"unexpected": True})
@@ -82,7 +106,6 @@ with urllib.request.urlopen(request, timeout=5) as response:
     assert response.headers.get("X-MailMCP-Trace-ID")
     assert json.load(response)["result"]["isError"]
 
-import time
 expired_id = "12345678-1234-1234-1234-123456789012"
 request = urllib.request.Request(f"http://127.0.0.1:{port}/mcp",
                                 data=call("get_move_status", {"operationId": expired_id}), headers=headers)
