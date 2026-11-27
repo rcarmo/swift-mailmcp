@@ -70,7 +70,7 @@ final class HTTPServer {
     private let automation: DispatchQueue
     private let operationCalls = DispatchQueue(label: "MailMCP.Operations")
     private let tools: Tools
-    private let tokenHash: SHA256.Digest
+    private var tokenHash: SHA256.Digest
     private let hosts: Set<String>
     private var clients: [UUID: NWConnection] = [:]
     private var pendingMailCalls = 0
@@ -80,7 +80,8 @@ final class HTTPServer {
     private static let serverInfo = ["name": "MailMCP", "version": "0.5.0"]
     private static let capabilities: JSON = ["tools": [:] as JSON, "prompts": [:] as JSON]
 
-    init(port: UInt16, token: String, stateDirectory: URL) throws {
+    init(port: UInt16, token: String, stateDirectory: URL,
+         onStatus: ((Result<Void, Error>) -> Void)? = nil) throws {
         let automation = DispatchQueue(label: "MailMCP.Automation", attributes: .concurrent)
         self.automation = automation
         tools = Tools(stateDirectory: stateDirectory)
@@ -94,9 +95,10 @@ final class HTTPServer {
             case .ready:
                 print("MailMCP listening at http://127.0.0.1:\(port)/mcp")
                 fflush(stdout)
+                onStatus?(.success(()))
             case .failed(let error):
                 fputs("Listener failed: \(error)\n", stderr)
-                exit(1)
+                if let onStatus { onStatus(.failure(error)) } else { exit(1) }
             default: break
             }
         }
@@ -107,6 +109,11 @@ final class HTTPServer {
         try tools.takeOverMoves(handoff)
         tools.startMaintenance()
         listener.start(queue: network)
+    }
+
+    func setToken(_ token: String) {
+        let hash = SHA256.hash(data: Data(token.utf8))
+        network.sync { tokenHash = hash }
     }
 
     private func accept(_ connection: NWConnection) {

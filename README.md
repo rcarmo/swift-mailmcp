@@ -1,6 +1,8 @@
 # MailMCP
 
-A Swift MCP server for organizing messages in Apple Mail.
+![MailMCP app icon](docs/icon-256.png)
+
+A macOS app that provides a local Swift MCP server for organizing messages in Apple Mail.
 
 - **Scope.** MailMCP deliberately limits agents to organizing mail. They can discover folders, read metadata, search available content, and file messages. Sending email and accessing account credentials are outside the tool surface.
 - **Local automation.** A signed app sends native Apple Events using Mail's scripting dictionary in the logged-in macOS session. The server listens on loopback for sandboxed agents. Keep the bearer token private.
@@ -8,9 +10,14 @@ A Swift MCP server for organizing messages in Apple Mail.
 
 ## Get started
 
-1. Build and sign the app, create a bearer token, and grant Mail Automation permission. [Setup](docs/setup.md)
-2. Connect your MCP client to [http://127.0.0.1:8765/mcp](http://127.0.0.1:8765/mcp) using Streamable HTTP and the bearer token.
-3. Run `list_mailboxes` to discover the account IDs, folder paths, and mailbox IDs.
+1. [Build and sign the app](docs/setup.md#build-and-sign), then grant Mail Automation permission with `make authorize`.
+2. Run `make start` to launch the app and create a token on first use. You can also [open the app in Finder and set a token](docs/setup.md#start-mailmcp).
+3. In MailMCP, click **Copy Token**. Connect your MCP client to [http://127.0.0.1:8765/mcp](http://127.0.0.1:8765/mcp) using Streamable HTTP and the copied token.
+4. Run `list_mailboxes` to discover the account IDs, folder paths, and mailbox IDs.
+
+Open the status window from the Dock or choose **Show Status** from the menu
+bar envelope. The window shows the endpoint and masks the current token. Run
+`make status` to check the authenticated endpoint from Terminal.
 
 ## Tools and prompts
 

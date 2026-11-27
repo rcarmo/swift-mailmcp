@@ -5,9 +5,9 @@
     <key>CFBundleExecutable</key><string>MailMCP</string>
     <key>CFBundleName</key><string>MailMCP</string>
     <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleIconFile</key><string>MailMCP.icns</string>
     <key>CFBundleShortVersionString</key><string>0.5.0</string>
-    <key>CFBundleVersion</key><string>11</string>
+    <key>CFBundleVersion</key><string>14</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
-    <key>LSUIElement</key><true/>
     <key>NSAppleEventsUsageDescription</key><string>MailMCP uses Mail automation to list, search and file messages at your request.</string>
 </dict></plist>

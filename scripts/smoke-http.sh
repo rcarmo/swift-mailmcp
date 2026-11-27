@@ -24,7 +24,7 @@ for message in (2, 3):
     }))
 BATCH_FIXTURE
 MAILMCP_PORT=$port MAILMCP_TOKEN=$token MAILMCP_STATE_DIR="$work/state" MAILMCP_TRACE_STDERR=1 \
-    "$binary" >"$work/server.log" 2>&1 &
+    "$binary" --headless >"$work/server.log" 2>&1 &
 pid=$!
 trap 'result=$?; kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; if (( result != 0 )); then cat "$work/server.log"; fi; rm -rf "$work"' EXIT
 

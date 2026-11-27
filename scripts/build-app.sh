@@ -9,6 +9,7 @@ if [[ "$identity" == "-" ]]; then
 fi
 
 config=${MAILMCP_BUILD_CONFIGURATION:-release}
+destination=${1:-$PWD/dist/MailMCP.app}
 mkdir -p dist .build/module-cache
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$PWD/.build/module-cache}"
 swift build --disable-sandbox -c "$config"
@@ -17,9 +18,17 @@ stage=$(mktemp -d "$PWD/dist/.build.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
 bundle="$stage/MailMCP.app"
-mkdir -p "$bundle/Contents/MacOS"
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 install -m 755 "$binary_dir/MailMCP" "$bundle/Contents/MacOS/MailMCP"
 install -m 644 scripts/Info.plist "$bundle/Contents/Info.plist"
+
+iconset="$stage/MailMCP.iconset"
+mkdir "$iconset"
+for size in 16 32 128 256 512; do
+    sips -Z "$size" docs/icon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    sips -Z "$((size * 2))" docs/icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$bundle/Contents/Resources/MailMCP.icns"
 
 sign_options=(--sign "$identity" --options runtime --entitlements scripts/entitlements.plist)
 if [[ -n "${MAILMCP_SIGN_KEYCHAIN:-}" ]]; then
@@ -36,5 +45,5 @@ fi
 codesign "${sign_options[@]}" "$bundle"
 codesign --verify --strict --verbose=2 "$bundle"
 codesign -d -r- "$bundle"
-ditto "$bundle" "$PWD/dist/MailMCP.app"
-codesign --verify --strict "$PWD/dist/MailMCP.app"
+ditto "$bundle" "$destination"
+codesign --verify --strict "$destination"

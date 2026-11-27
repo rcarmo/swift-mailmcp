@@ -1,5 +1,18 @@
 # Operations
 
+## Check the running app
+
+Open the MailMCP status window or run `make status` to check the server. A
+connection refusal usually means the app is stopped or listening on a different
+port. If authentication fails, use **Copy Token** in the status window to update
+your client. For `make status`, check that the command uses the same state
+directory and port as the app.
+
+If a launch through `make start` fails, check `server.log` in the state directory
+(`~/Library/Application Support/MailMCP` by default). Use `make logs` to stream
+runtime diagnostics. After quitting and reopening the app, the server uses the
+saved token file unless `MAILMCP_TOKEN` is set.
+
 ## Journal retention
 
 - The default journal is `~/Library/Application Support/MailMCP/moves.sqlite3`. Use `MAILMCP_STATE_DIR` for an isolated instance.
@@ -19,7 +32,9 @@ Tool responses include an `X-MailMCP-Trace-ID` header. Watch the corresponding r
 log stream --style compact --predicate 'subsystem == "net.rcarmo.mailmcp"'
 ```
 
-For a foreground diagnostic run, set `MAILMCP_TRACE_STDERR=1` and redirect stderr to a local file. Use a separate `MAILMCP_PORT` if the regular server is already running.
+For a foreground diagnostic run, invoke the bundled executable with `--headless`,
+set `MAILMCP_TRACE_STDERR=1`, and redirect stderr to a local file. Use a separate
+`MAILMCP_PORT` and `MAILMCP_STATE_DIR` if the app is already running.
 
 - Logs include tool names, trace IDs, operation IDs, durations, and Apple Event error codes.
 - The server budgets 20 seconds for a Mail read, including queue time. Each read event can take up to four seconds. A recent range timeout can cause small pages to use indexed reads on the next call.

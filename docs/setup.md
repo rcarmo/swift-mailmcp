@@ -7,34 +7,43 @@ Use a persistent certificate-backed identity. For Developer ID, set `MAILMCP_SIG
 ```sh
 export MAILMCP_SIGN_IDENTITY='<existing identity name or fingerprint>'
 # For a self-signed local identity, also set MAILMCP_SIGN_CERT_SHA1 to its fingerprint.
-swift test
-scripts/build-app.sh
-scripts/smoke-http.sh
+make build
 ```
-
-The HTTP smoke test needs Python 3. It uses an isolated state directory and runs without access to Mail. Run it with a different `MAILMCP_TEST_PORT` if port 18765 is in use.
 
 Keep the bundle identifier and signing identity stable on rebuilds. The local build pins the designated requirement to the certificate in the login keychain. Keep the private key available to sign updates. The bundle and signing scripts use Apple's [Apple Events entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.automation.apple-events) and [designated requirements](https://developer.apple.com/library/archive/technotes/tn2206/).
 
-## Run the signed server
+## Grant Mail Automation access
 
-Generate a bearer token once and use it in your MCP client.
+Run `make authorize` and choose **Allow** when macOS asks to let MailMCP control
+Mail. The command opens the signed bundle so macOS can attribute that permission
+to MailMCP.
+
+## Start MailMCP
+
+Open `dist/MailMCP.app` from Finder. If the app has no token yet, generate one
+with `openssl rand -hex 32`, paste it into the **Bearer token** field, and click
+**Set Token** to start the server.
+
+With Python 3 installed, you can also launch and check the app from Terminal.
 
 ```sh
-umask 077
-config="$HOME/Library/Application Support/MailMCP"
-mkdir -p "$config"
-( set -C; openssl rand -hex 32 > "$config/token" )
+make start
+make status
 ```
 
-Request Mail Automation access once and choose **Allow** when macOS prompts. Start the bundle through Launch Services so macOS attributes automation to MailMCP.
+`make start` creates an owner-only token file if needed, builds the signed
+bundle if it is missing, and reuses an already healthy instance. Run
+`make build` explicitly after source changes. `make status` checks the
+authenticated endpoint without accessing Mail. See [Operations](operations.md#check-the-running-app)
+for startup troubleshooting.
 
-```sh
-open -W -a "$PWD/dist/MailMCP.app" --args --authorize-mail
-open -a "$PWD/dist/MailMCP.app"
-```
+Click the Dock icon or choose **Show Status** from the menu bar envelope to
+open the status window. Closing the window keeps the server running. Choose
+**Quit MailMCP** to stop the server.
 
-Set up the MCP client with these values.
+## Connect your MCP client
+
+Click **Copy Token** in the status window and configure the client.
 
 - **Transport** is Streamable HTTP.
 - **Endpoint** is [http://127.0.0.1:8765/mcp](http://127.0.0.1:8765/mcp).
@@ -54,11 +63,27 @@ printf 'Authorization: Bearer %s\n' "$(cat "$HOME/Library/Application Support/Ma
 
 ## Runtime settings
 
+The **Bearer token** field shows the active token as dots. Edit it and click
+**Set Token** to save a replacement and apply it immediately. Update your MCP
+clients with the new value. Tokens must be 32 to 512 printable ASCII
+characters, without spaces or commas. A token supplied by `MAILMCP_TOKEN`
+can be copied from the app and is changed through the environment.
+
 | Variable | Purpose |
 | --- | --- |
 | `MAILMCP_TOKEN` | Override the bearer token from the owner-only token file. |
 | `MAILMCP_PORT` | Override the default loopback port, 8765. |
 | `MAILMCP_STATE_DIR` | Use an absolute directory for the journal and token file. The default is `~/Library/Application Support/MailMCP`. |
 | `MAILMCP_TRACE_STDERR` | Set to `1` to emit request timing to stderr in a foreground run. |
+
+`make start` and `make status` honor `MAILMCP_PORT` and `MAILMCP_STATE_DIR` and
+use the token file. Unset `MAILMCP_TOKEN` when using those targets.
+
+## Test a build
+
+Run `make test` for Swift tests and `make smoke` for HTTP checks. The smoke
+check needs Python 3 and runs the server in an isolated state directory without
+accessing Mail. Set `MAILMCP_TEST_PORT` if port 18765 is in use. `make help`
+lists the available targets.
 
 [Back to the README](../README.md)
